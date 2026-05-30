@@ -1,0 +1,7 @@
+replicaCount: 1
+image:
+  tag: dev
+env:
+  ASPNETCORE_ENVIRONMENT: Development
+  SmartBI__BaseUrl: https://dev-smartbi.example.com
+  SmartQuery__Endpoint: /api/query/dev

@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.nameOverride | default .Chart.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Values.nameOverride | default .Chart.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.nameOverride | default .Chart.Name }}
+    spec:
+      containers:
+        - name: smartbi-api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.targetPort }}
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: {{ .Values.env.ASPNETCORE_ENVIRONMENT | quote }}
+            - name: SmartBI__BaseUrl
+              value: {{ .Values.env.SmartBI__BaseUrl | quote }}
+            - name: SmartQuery__Endpoint
+              value: {{ .Values.env.SmartQuery__Endpoint | quote }}
+          resources:
+{{ toYaml .Values.resources | indent 12 }}

@@ -1,0 +1,32 @@
+nameOverride: smartbi-app
+replicaCount: 1
+
+image:
+  repository: ghcr.io/example/smartbi-api
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: nginx
+  host: smartbi.example.com
+  path: /
+  pathType: Prefix
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+env:
+  ASPNETCORE_ENVIRONMENT: Production
+  SmartBI__BaseUrl: https://smartbi.example.com
+  SmartQuery__Endpoint: /api/query

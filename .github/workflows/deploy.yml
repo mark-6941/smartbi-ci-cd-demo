@@ -1,0 +1,67 @@
+name: deploy
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_REPOSITORY: ${{ secrets.IMAGE_REPOSITORY }}
+      K8S_NAMESPACE: smartbi
+      HELM_RELEASE_NAME: smartbi-app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.2
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.0
+
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build image
+        run: |
+          docker build -t $IMAGE_REPOSITORY:${{ github.sha }} .
+          docker tag $IMAGE_REPOSITORY:${{ github.sha }} $IMAGE_REPOSITORY:latest
+
+      - name: Push image
+        run: |
+          docker push $IMAGE_REPOSITORY:${{ github.sha }}
+          docker push $IMAGE_REPOSITORY:latest
+
+      - name: Prepare kubeconfig
+        shell: bash
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG_B64 }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install $HELM_RELEASE_NAME ./charts/smartbi-app             --namespace $K8S_NAMESPACE             --create-namespace             -f ./charts/smartbi-app/values.yaml             -f ./charts/smartbi-app/values-dev.yaml             --set image.repository=$IMAGE_REPOSITORY             --set image.tag=${{ github.sha }}             --set env.SmartBI__BaseUrl="${{ secrets.SMARTBI_BASE_URL }}"             --set env.SmartQuery__Endpoint="${{ secrets.SMARTQUERY_ENDPOINT }}"
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          kubectl rollout status deployment/smartbi-app -n $K8S_NAMESPACE --timeout=180s

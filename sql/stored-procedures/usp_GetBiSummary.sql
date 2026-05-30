@@ -1,0 +1,8 @@
+CREATE OR ALTER PROCEDURE dbo.usp_GetBiSummary
+    @DeptNo NVARCHAR(20)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT @DeptNo AS DeptNo, GETDATE() AS GeneratedAt;
+END
+GO

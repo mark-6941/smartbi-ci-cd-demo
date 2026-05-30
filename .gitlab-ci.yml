@@ -1,0 +1,108 @@
+stages:
+  - validate
+  - build
+  - test
+  - package
+  - deploy
+  - smoke
+
+variables:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "true"
+  K8S_NAMESPACE: "smartbi"
+  HELM_RELEASE_NAME: "smartbi-app"
+
+default:
+  image: mcr.microsoft.com/dotnet/sdk:8.0
+  before_script:
+    - dotnet --info
+
+cache:
+  paths:
+    - .nuget/packages/
+
+validate:sp:
+  stage: validate
+  script:
+    - pwsh ./scripts/powershell/detect-sp-changes.ps1 -BaseRef "${CI_COMMIT_BEFORE_SHA}"
+  artifacts:
+    paths:
+      - artifacts/sp-changes.json
+
+build:api:
+  stage: build
+  script:
+    - pwsh ./scripts/powershell/build-dotnet.ps1 -Configuration Release
+  artifacts:
+    paths:
+      - artifacts/build/
+
+unit:test:
+  stage: test
+  script:
+    - pwsh ./scripts/powershell/test-dotnet.ps1 -Configuration Release
+  artifacts:
+    when: always
+    paths:
+      - artifacts/test-results/
+
+package:publish:
+  stage: package
+  script:
+    - pwsh ./scripts/powershell/publish-dotnet.ps1 -Configuration Release
+  artifacts:
+    paths:
+      - artifacts/publish/
+  rules:
+    - if: '$CI_COMMIT_BRANCH'
+
+helm:lint:
+  stage: test
+  image: alpine/helm:3.15.2
+  script:
+    - helm lint ./charts/smartbi-app
+    - helm template smartbi-app ./charts/smartbi-app -f ./charts/smartbi-app/values-dev.yaml > rendered-dev.yaml
+  artifacts:
+    paths:
+      - rendered-dev.yaml
+
+container:build:
+  stage: package
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  script:
+    - echo "$REGISTRY_PASSWORD" | docker login ghcr.io -u "$REGISTRY_USERNAME" --password-stdin
+    - docker build -t $IMAGE_REPOSITORY:$CI_COMMIT_SHORT_SHA .
+    - docker tag $IMAGE_REPOSITORY:$CI_COMMIT_SHORT_SHA $IMAGE_REPOSITORY:latest
+    - docker push $IMAGE_REPOSITORY:$CI_COMMIT_SHORT_SHA
+    - docker push $IMAGE_REPOSITORY:latest
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+deploy:k8s:
+  stage: deploy
+  image: alpine/helm:3.15.2
+  before_script:
+    - apk add --no-cache bash curl kubectl
+    - mkdir -p ~/.kube
+    - echo "$KUBE_CONFIG_B64" | base64 -d > ~/.kube/config
+    - chmod 600 ~/.kube/config
+  script:
+    - helm upgrade --install $HELM_RELEASE_NAME ./charts/smartbi-app --namespace $K8S_NAMESPACE --create-namespace -f ./charts/smartbi-app/values.yaml -f ./charts/smartbi-app/values-dev.yaml --set image.repository=$IMAGE_REPOSITORY --set image.tag=$CI_COMMIT_SHORT_SHA --set env.SmartBI__BaseUrl="$SMARTBI_BASE_URL" --set env.SmartQuery__Endpoint="$SMARTQUERY_ENDPOINT"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+smoke:test:
+  stage: smoke
+  image: bitnami/kubectl:1.30
+  before_script:
+    - mkdir -p ~/.kube
+    - echo "$KUBE_CONFIG_B64" | base64 -d > ~/.kube/config
+    - chmod 600 ~/.kube/config
+  script:
+    - kubectl rollout status deployment/smartbi-app -n $K8S_NAMESPACE --timeout=180s
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'

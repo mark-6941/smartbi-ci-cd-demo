@@ -1,0 +1,63 @@
+name: build-test-validate
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-test-validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.2
+
+      - name: Detect stored procedure changes
+        shell: pwsh
+        run: ./scripts/powershell/detect-sp-changes.ps1 -BaseRef "${{ github.event.before || 'HEAD~1' }}"
+
+      - name: Build .NET API
+        shell: pwsh
+        run: ./scripts/powershell/build-dotnet.ps1 -Configuration Release
+
+      - name: Test .NET API
+        shell: pwsh
+        run: ./scripts/powershell/test-dotnet.ps1 -Configuration Release
+
+      - name: Publish .NET API
+        shell: pwsh
+        run: ./scripts/powershell/publish-dotnet.ps1 -Configuration Release
+
+      - name: Helm lint
+        shell: bash
+        run: |
+          helm lint ./charts/smartbi-app
+          helm template smartbi-app ./charts/smartbi-app -f ./charts/smartbi-app/values-dev.yaml > rendered-dev.yaml
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: |
+            artifacts/build/
+            artifacts/test-results/
+            artifacts/publish/
+            artifacts/sp-changes.json
+            rendered-dev.yaml

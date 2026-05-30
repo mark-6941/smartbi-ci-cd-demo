@@ -1,0 +1,8 @@
+backup:
+  enabled: true
+  strategy: kubectl-export
+  namespace: smartbi
+  resources:
+    - deployment
+    - service
+    - ingress
