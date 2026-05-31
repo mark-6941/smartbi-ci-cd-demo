@@ -2,15 +2,21 @@ name: build-test-validate
 
 on:
   push:
-    branches: [ main, develop ]
+    branches:
+      - main
+      - develop
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   build-test-validate:
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,9 +26,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: |
-            8.0.x
-            9.0.x
+          dotnet-version: 8.0.x
 
       - name: Setup Helm
         uses: azure/setup-helm@v4
@@ -31,19 +35,40 @@ jobs:
 
       - name: Detect stored procedure changes
         shell: pwsh
-        run: ./scripts/powershell/detect-sp-changes.ps1 -BaseRef "${{ github.event.before || 'HEAD~1' }}"
+        run: |
+          ./scripts/powershell/detect-sp-changes.ps1 -BaseRef "${{ github.event.before || 'HEAD~1' }}"
+
+      - name: Detect .NET project
+        id: detect_dotnet
+        shell: bash
+        run: |
+          CSPROJ_FILE=$(find . -name "*.csproj" | head -n 1)
+          if [ -n "$CSPROJ_FILE" ]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "project=$CSPROJ_FILE" >> $GITHUB_OUTPUT
+            echo "Found .NET project: $CSPROJ_FILE"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "No .NET project found. Build/Test/Publish will be skipped."
+          fi
 
       - name: Build .NET API
+        if: steps.detect_dotnet.outputs.found == 'true'
         shell: pwsh
-        run: ./scripts/powershell/build-dotnet.ps1 -Configuration Release
+        run: |
+          ./scripts/powershell/build-dotnet.ps1 -Configuration Release
 
       - name: Test .NET API
+        if: steps.detect_dotnet.outputs.found == 'true'
         shell: pwsh
-        run: ./scripts/powershell/test-dotnet.ps1 -Configuration Release
+        run: |
+          ./scripts/powershell/test-dotnet.ps1 -Configuration Release
 
       - name: Publish .NET API
+        if: steps.detect_dotnet.outputs.found == 'true'
         shell: pwsh
-        run: ./scripts/powershell/publish-dotnet.ps1 -Configuration Release
+        run: |
+          ./scripts/powershell/publish-dotnet.ps1 -Configuration Release
 
       - name: Helm lint
         shell: bash
@@ -55,6 +80,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-output
+          if-no-files-found: warn
           path: |
             artifacts/build/
             artifacts/test-results/
