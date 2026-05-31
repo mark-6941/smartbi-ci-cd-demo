@@ -4,14 +4,15 @@ on:
   push:
     branches: [ main ]
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     env:
-      IMAGE_REPOSITORY: ${{ secrets.IMAGE_REPOSITORY }}
+      IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/smartbi-api
       K8S_NAMESPACE: smartbi
       HELM_RELEASE_NAME: smartbi-app
     steps:
@@ -33,12 +34,12 @@ jobs:
         with:
           version: v1.30.0
 
-      - name: Log in to registry
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build image
         run: |
@@ -64,4 +65,4 @@ jobs:
       - name: Smoke test
         shell: bash
         run: |
-          kubectl rollout status deployment/smartbi-app -n $K8S_NAMESPACE --timeout=180s
+          kubectl rollout status deployment/$HELM_RELEASE_NAME -n $K8S_NAMESPACE --timeout=180s
