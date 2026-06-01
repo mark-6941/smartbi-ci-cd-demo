@@ -1,0 +1,279 @@
+stages:
+  # - build
+  - test
+  # - deploy
+  - report
+
+variables:
+  PUBLISH_DIR: "$CI_PROJECT_DIR/publish"
+  IIS_SITE_NAME: "Default Web Site"
+  IIS_APP_POOL: "testcicd"
+  DEPLOY_PATH: "C:/inetpub/wwwroot/testcicd"
+  APP_PORT: "8080"
+
+# # ── Build ──────────────────────────────────────────────────────────────────────
+# build-app:
+#   stage: build
+#   tags:
+#     - shared-shell
+#   script:
+#     - dotnet restore
+#     - dotnet publish -c Release -o "$PUBLISH_DIR" --no-restore
+#   artifacts:
+#     paths:
+#       - publish/
+#     expire_in: 1 hour
+#   only:
+#     - develop
+#     - main
+
+# ── Test ───────────────────────────────────────────────────────────────────────
+run-tests:
+  stage: test
+  tags:
+    - shared-shell
+  script:
+    - dotnet restore
+    - dotnet test --no-restore --verbosity normal --logger "junit;LogFilePath=test-results.xml"
+  artifacts:
+    when: always
+    reports:
+      junit: "**/test-results.xml"
+    expire_in: 7 days
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+
+# # ── Deploy (develop → staging) ────────────────────────────────────────────────
+# # GitLab Variables 需要設定：
+# #   STAGING_SSH_HOST    → 目標 IIS Server IP 或 FQDN
+# #   STAGING_SSH_USER    → SSH 登入帳號（Windows 本機帳號，例如 deploy_user）
+# #   STAGING_SSH_KEY_B64 → SSH 私鑰 base64 編碼（Variable 類型，Protected）
+# deploy-staging:
+#   stage: deploy
+#   tags:
+#     - shared-shell
+#   before_script:
+#     - mkdir -p ~/.ssh
+#     - echo "$STAGING_SSH_KEY_B64" | base64 -d > ~/.ssh/id_deploy
+#     - chmod 600 ~/.ssh/id_deploy
+#     - ssh-keygen -y -f ~/.ssh/id_deploy && echo "KEY OK" || echo "KEY PARSE FAILED"
+#     - ssh-keyscan -H "$STAGING_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+#   script:
+#     - |
+#       # [1/3] Stop App Pool and prepare directory
+#       cat > /tmp/ps_stop.ps1 <<'PSEOF'
+#       $ErrorActionPreference = 'Stop'
+#       $appcmd = 'C:\Windows\System32\inetsrv\appcmd.exe'
+#       $pool = '${IIS_APP_POOL}'
+#       $path = '${DEPLOY_PATH}'
+#       Write-Host "[1/3] Stopping App Pool '$pool'..."
+#       $listOutput = & $appcmd list apppool $pool
+#       if (-not $listOutput) { Write-Error "App Pool '$pool' not found on server"; exit 1 }
+#       $state = (& $appcmd list apppool $pool /text:state).Trim()
+#       if ($state -ne 'Stopped') {
+#         & $appcmd stop apppool /apppool.name:$pool | Out-Null
+#         if ($LASTEXITCODE -ne 0) { Write-Error "Failed to stop pool"; exit 1 }
+#         Start-Sleep -Seconds 3
+#       }
+#       if (-not (Test-Path $path)) { New-Item -ItemType Directory -Path $path -Force }
+#       Write-Host "[1/3] App Pool stopped OK"
+#       PSEOF
+#       scp -i ~/.ssh/id_deploy /tmp/ps_stop.ps1 "$STAGING_SSH_USER@$STAGING_SSH_HOST:C:/Windows/Temp/ps_stop.ps1"
+#       ssh -i ~/.ssh/id_deploy "$STAGING_SSH_USER@$STAGING_SSH_HOST" powershell -NonInteractive -File C:/Windows/Temp/ps_stop.ps1
+#     - |
+#       # [2/3] Copy publish files
+#       echo "[2/3] Copying files..."
+#       scp -i ~/.ssh/id_deploy -r "$CI_PROJECT_DIR/publish/." \
+#           "$STAGING_SSH_USER@$STAGING_SSH_HOST:$DEPLOY_PATH/"
+#       echo "[2/3] Files copied OK"
+#     - |
+#       # [3/3] Start App Pool and health check
+#       cat > /tmp/ps_start.ps1 <<'PSEOF'
+#       $ErrorActionPreference = 'Stop'
+#       $appcmd = 'C:\Windows\System32\inetsrv\appcmd.exe'
+#       $pool = '${IIS_APP_POOL}'
+#       $port = '${APP_PORT}'
+#       Write-Host "[3/3] Starting App Pool '$pool'..."
+#       & $appcmd start apppool /apppool.name:$pool | Out-Null
+#       if ($LASTEXITCODE -ne 0) { Write-Error "Failed to start pool"; exit 1 }
+#       Start-Sleep -Seconds 5
+#       $state = (& $appcmd list apppool $pool /text:state).Trim()
+#       if ($state -ne 'Started') { Write-Error "App pool failed. State: $state"; exit 1 }
+#       Write-Host "[3/3] Running health check on port $port..."
+#       try {
+#         $resp = Invoke-WebRequest -Uri "http://localhost:$port/testcicd/health" -UseBasicParsing -TimeoutSec 10
+#         if ($resp.StatusCode -ne 200) { Write-Error "Health check failed: $($resp.StatusCode)"; exit 1 }
+#       } catch {
+#         Write-Error "Health check exception: $_"; exit 1
+#       }
+#       Write-Host "Deploy OK - App pool: $state"
+#       PSEOF
+#       scp -i ~/.ssh/id_deploy /tmp/ps_start.ps1 "$STAGING_SSH_USER@$STAGING_SSH_HOST:C:/Windows/Temp/ps_start.ps1"
+#       ssh -i ~/.ssh/id_deploy "$STAGING_SSH_USER@$STAGING_SSH_HOST" powershell -NonInteractive -File C:/Windows/Temp/ps_start.ps1
+#   environment:
+#     name: staging
+#   rules:
+#     - if: '$CI_PIPELINE_SOURCE == "schedule"'
+#       when: never
+#     - if: '$CI_COMMIT_BRANCH == "develop"'
+#       when: on_success
+
+# # ── Deploy (main → production) ────────────────────────────────────────────────
+# # GitLab Variables 需要設定：
+# #   PROD_SSH_HOST  → 目標 IIS Server IP 或 FQDN
+# #   PROD_SSH_USER  → SSH 登入帳號
+# #   PROD_SSH_KEY   → SSH 私鑰（File 類型，Protected）
+# deploy-production:
+#   stage: deploy
+#   tags:
+#     - shared-shell
+#   before_script:
+#     - mkdir -p ~/.ssh
+#     - cp "$PROD_SSH_KEY" ~/.ssh/id_deploy
+#     - chmod 600 ~/.ssh/id_deploy
+#     - ssh-keyscan -p 22 -H "$PROD_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+#   script:
+#     - |
+#       cat > /tmp/ps_stop.ps1 <<'PSEOF'
+#       $ErrorActionPreference = 'Stop'
+#       $appcmd = 'C:\Windows\System32\inetsrv\appcmd.exe'
+#       $pool = '${IIS_APP_POOL}'
+#       $path = '${DEPLOY_PATH}'
+#       $listOutput = & $appcmd list apppool $pool
+#       if (-not $listOutput) { Write-Error "App Pool '$pool' not found on server"; exit 1 }
+#       $state = (& $appcmd list apppool $pool /text:state).Trim()
+#       if ($state -ne 'Stopped') {
+#         & $appcmd stop apppool /apppool.name:$pool | Out-Null
+#         if ($LASTEXITCODE -ne 0) { Write-Error "Failed to stop pool"; exit 1 }
+#         Start-Sleep -Seconds 3
+#       }
+#       if (-not (Test-Path $path)) { New-Item -ItemType Directory -Path $path -Force }
+#       PSEOF
+#       scp -i ~/.ssh/id_deploy /tmp/ps_stop.ps1 "$PROD_SSH_USER@$PROD_SSH_HOST:C:/Windows/Temp/ps_stop.ps1"
+#       ssh -i ~/.ssh/id_deploy "$PROD_SSH_USER@$PROD_SSH_HOST" powershell -NonInteractive -File C:/Windows/Temp/ps_stop.ps1
+#     - |
+#       scp -i ~/.ssh/id_deploy -r "$CI_PROJECT_DIR/publish/." \
+#           "$PROD_SSH_USER@$PROD_SSH_HOST:$DEPLOY_PATH/"
+#     - |
+#       cat > /tmp/ps_start.ps1 <<'PSEOF'
+#       $ErrorActionPreference = 'Stop'
+#       $appcmd = 'C:\Windows\System32\inetsrv\appcmd.exe'
+#       $pool = '${IIS_APP_POOL}'
+#       $port = '${APP_PORT}'
+#       & $appcmd start apppool /apppool.name:$pool | Out-Null
+#       if ($LASTEXITCODE -ne 0) { Write-Error "Failed to start pool"; exit 1 }
+#       Start-Sleep -Seconds 5
+#       $state = (& $appcmd list apppool $pool /text:state).Trim()
+#       if ($state -ne 'Started') { Write-Error "App pool failed. State: $state"; exit 1 }
+#       try {
+#         $resp = Invoke-WebRequest -Uri "http://localhost:$port/testcicd/health" -UseBasicParsing -TimeoutSec 10
+#         if ($resp.StatusCode -ne 200) { Write-Error "Health check failed: $($resp.StatusCode)"; exit 1 }
+#       } catch {
+#         Write-Error "Health check exception: $_"; exit 1
+#       }
+#       Write-Host "Deploy OK - App pool: $state"
+#       PSEOF
+#       scp -i ~/.ssh/id_deploy /tmp/ps_start.ps1 "$PROD_SSH_USER@$PROD_SSH_HOST:C:/Windows/Temp/ps_start.ps1"
+#       ssh -i ~/.ssh/id_deploy "$PROD_SSH_USER@$PROD_SSH_HOST" powershell -NonInteractive -File C:/Windows/Temp/ps_start.ps1
+#   environment:
+#     name: production
+#   rules:
+#     - if: '$CI_PIPELINE_SOURCE == "schedule"'
+#       when: never
+#     - if: '$CI_COMMIT_BRANCH == "main"'
+#       when: manual
+
+# ── CI Failure Issue ──────────────────────────────────────────────────────────
+# develop 分支 pipeline 失敗時，自動開立 GitLab Issue 並指派給 commit 作者
+notify-failure-issue:
+  stage: report
+  tags:
+    - shared-shell
+  script:
+    - |
+      ISSUE_TITLE="CI Failure: [${CI_COMMIT_BRANCH}] ${CI_COMMIT_SHORT_SHA}"
+      TODAY=$(date '+%Y-%m-%d')
+      TIME_NOW=$(date '+%Y-%m-%d %H:%M:%S')
+
+      AUTHOR_EMAIL=$(echo "$CI_COMMIT_AUTHOR" | grep -oP '(?<=<)[^>]+(?=>)' || true)
+      AUTHOR_ID=""
+      if [ -n "$AUTHOR_EMAIL" ]; then
+        AUTHOR_ID=$(curl --silent \
+          --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+          "${CI_API_V4_URL}/users?search=${AUTHOR_EMAIL}" \
+          | grep -oP '"id":\\K\\d+' | head -1 || true)
+      fi
+
+      EXISTING_ISSUE=$(curl --silent \
+        --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues?labels=ci-failure&state=opened&search=${CI_COMMIT_BRANCH}" \
+        | grep -oP '"iid":\\K\\d+' | head -1 || true)
+
+      if [ -n "$EXISTING_ISSUE" ]; then
+        echo "Open ci-failure issue #${EXISTING_ISSUE} already exists for branch ${CI_COMMIT_BRANCH}, adding comment."
+        curl --silent --request POST \
+          --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+          --header "Content-Type: application/json" \
+          --data "{\"body\": \"New failure on commit \`${CI_COMMIT_SHORT_SHA}\` at ${TIME_NOW}. Pipeline: [#${CI_PIPELINE_ID}](${CI_PIPELINE_URL})\"}" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues/${EXISTING_ISSUE}/notes"
+      else
+        ISSUE_BODY="## CI Pipeline Failed
+
+- **Pipeline:** [#${CI_PIPELINE_ID}](${CI_PIPELINE_URL})
+- **Branch:** \`${CI_COMMIT_BRANCH}\`
+- **Commit:** \`${CI_COMMIT_SHORT_SHA}\` ${CI_COMMIT_TITLE}
+- **Author:** ${CI_COMMIT_AUTHOR}
+- **Time:** ${TIME_NOW}
+
+Please investigate and close this issue once resolved."
+
+        if [ -n "$AUTHOR_ID" ]; then
+          PAYLOAD="{\"title\": \"${ISSUE_TITLE}\", \"description\": \"${ISSUE_BODY}\", \"labels\": \"ci-failure,priority::high\", \"due_date\": \"${TODAY}\", \"assignee_ids\": [${AUTHOR_ID}]}"
+        else
+          PAYLOAD="{\"title\": \"${ISSUE_TITLE}\", \"description\": \"${ISSUE_BODY}\", \"labels\": \"ci-failure,priority::high\", \"due_date\": \"${TODAY}\"}"
+        fi
+
+        ISSUE_RESPONSE=$(curl --silent --show-error \
+          --request POST \
+          --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+          --header "Content-Type: application/json" \
+          --data "$PAYLOAD" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues")
+
+        ISSUE_IID=$(echo "$ISSUE_RESPONSE" | grep -oP '"iid":\\K\\d+' | head -1 || true)
+        if [ -n "$ISSUE_IID" ]; then
+          echo "Issue created: ${CI_SERVER_URL}/${CI_PROJECT_PATH}/-/issues/${ISSUE_IID}"
+        else
+          echo "Warning: Issue creation may have failed. Response: $ISSUE_RESPONSE"
+        fi
+      fi
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == "develop"'
+      when: on_failure
+    - when: never
+
+# ── CI Report Email ───────────────────────────────────────────────────────────
+# develop 分支 pipeline 完成後，不論成功失敗都寄送報告信
+# 失敗時信件內附失敗 job 的最後 50 行 log
+# 收件人清單維護：.gitlab/oncall-map.sh
+notify-email:
+  stage: report
+  tags:
+    - shared-shell
+  script:
+    - |
+      source .gitlab/oncall-map.sh
+      REPORT_EMAIL_TO=$(get_oncall_emails | tr '\n' ',' | sed 's/,$//')
+      export REPORT_EMAIL_TO
+
+      if [ -z "$REPORT_EMAIL_TO" ]; then
+        echo "No oncall emails configured, skipping notification"
+        exit 0
+      fi
+
+      echo "Sending CI report to: $REPORT_EMAIL_TO"
+      python3 .gitlab/ci-report.py || true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == "develop"'
+      when: always
+    - when: never
