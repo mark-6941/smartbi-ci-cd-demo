@@ -6,39 +6,67 @@ stages:
   - deploy
   - smoke
 
+# ── 全域參數化變數宣告 ────────────────────────────────────────
 variables:
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
   DOTNET_NOLOGO: "true"
-  K8S_NAMESPACE: "smartbi"
-  HELM_RELEASE_NAME: "smartbi-app"
+  # 注意：以下 IIS 與 DB 相關變數建議在 GitLab UI (Settings -> CI/CD -> Variables) 中設定為 Masked / Protected
+  # STAGING_DB_CONNECTION: "Data Source=YourDbServer;Initial Catalog=SmartBI_DB;User ID=sa;Password=..."
+  # IIS_DEPLOY_PATH: "C:\\inetpub\\wwwroot\\SmartBI"
+  # STAGING_API_URL: "http://localhost:8080"
 
+# ── 預設全域環境設定 ──────────────────────────────────────────
 default:
   image: mcr.microsoft.com/dotnet/sdk:8.0
   before_script:
     - dotnet --info
 
+# ── 全域快取機制 (加速 NuGet 套件還原) ─────────────────────────
 cache:
   paths:
     - .nuget/packages/
 
+# ============================================================
+#  STAGE 1: VALIDATE (驗證階段)
+# ============================================================
+
+# 偵測預存程序 (SP) 檔案變更
 validate:sp:
   stage: validate
+  tags:
+    - linux-docker-runner   # 程式碼靜態分析與偵測可在 Linux 容器快速執行
   script:
     - pwsh ./scripts/powershell/detect-sp-changes.ps1 -BaseRef "${CI_COMMIT_BEFORE_SHA}"
   artifacts:
     paths:
       - artifacts/sp-changes.json
 
+# ============================================================
+#  STAGE 2: BUILD (編譯階段)
+# ============================================================
+
+# 編譯 .NET Core Web API 專案
 build:api:
   stage: build
+  tags:
+    - linux-docker-runner
   script:
     - pwsh ./scripts/powershell/build-dotnet.ps1 -Configuration Release
   artifacts:
     paths:
       - artifacts/build/
 
+# ============================================================
+#  STAGE 3: TEST (測試階段)
+# ============================================================
+
+# 執行 .NET 單元測試
 unit:test:
   stage: test
+  tags:
+    - linux-docker-runner
+  dependencies:
+    - build:api
   script:
     - pwsh ./scripts/powershell/test-dotnet.ps1 -Configuration Release
   artifacts:
@@ -46,8 +74,17 @@ unit:test:
     paths:
       - artifacts/test-results/
 
+# ============================================================
+#  STAGE 4: PACKAGE (打包階段)
+# ============================================================
+
+# 發布並打包符合 IIS 部署結構的實體檔案
 package:publish:
   stage: package
+  tags:
+    - linux-docker-runner
+  dependencies:
+    - build:api
   script:
     - pwsh ./scripts/powershell/publish-dotnet.ps1 -Configuration Release
   artifacts:
@@ -56,53 +93,114 @@ package:publish:
   rules:
     - if: '$CI_COMMIT_BRANCH'
 
-helm:lint:
-  stage: test
-  image: alpine/helm:3.15.2
-  script:
-    - helm lint ./charts/smartbi-app
-    - helm template smartbi-app ./charts/smartbi-app -f ./charts/smartbi-app/values-dev.yaml > rendered-dev.yaml
-  artifacts:
-    paths:
-      - rendered-dev.yaml
+# ============================================================
+#  STAGE 5: DEPLOY (實體 IIS 部署階段)
+# ============================================================
 
-container:build:
-  stage: package
-  image: docker:27
-  services:
-    - docker:27-dind
-  variables:
-    DOCKER_TLS_CERTDIR: "/certs"
-  script:
-    - echo "$REGISTRY_PASSWORD" | docker login ghcr.io -u "$REGISTRY_USERNAME" --password-stdin
-    - docker build -t $IMAGE_REPOSITORY:$CI_COMMIT_SHORT_SHA .
-    - docker tag $IMAGE_REPOSITORY:$CI_COMMIT_SHORT_SHA $IMAGE_REPOSITORY:latest
-    - docker push $IMAGE_REPOSITORY:$CI_COMMIT_SHORT_SHA
-    - docker push $IMAGE_REPOSITORY:latest
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
-
-deploy:k8s:
+# 實際部署至 Staging Windows Server 環境
+deploy:iis-staging:
   stage: deploy
-  image: alpine/helm:3.15.2
-  before_script:
-    - apk add --no-cache bash curl kubectl
-    - mkdir -p ~/.kube
-    - echo "$KUBE_CONFIG_B64" | base64 -d > ~/.kube/config
-    - chmod 600 ~/.kube/config
-  script:
-    - helm upgrade --install $HELM_RELEASE_NAME ./charts/smartbi-app --namespace $K8S_NAMESPACE --create-namespace -f ./charts/smartbi-app/values.yaml -f ./charts/smartbi-app/values-dev.yaml --set image.repository=$IMAGE_REPOSITORY --set image.tag=$CI_COMMIT_SHORT_SHA --set env.SmartBI__BaseUrl="$SMARTBI_BASE_URL" --set env.SmartQuery__Endpoint="$SMARTQUERY_ENDPOINT"
+  tags:
+    - self-hosted
+    - windows
+    - staging
+  environment:
+    name: staging
+    url: ${STAGING_API_URL}
+  dependencies:
+    - package:publish       # 強制下載前一階段打包好的 artifacts/publish/
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "develop" || $CI_COMMIT_BRANCH == "main"'
+  script:
+    # 1. 停止現有 IIS 站台與應用程式池 (避免檔案鎖死 File Lock)
+    - |
+      $ErrorActionPreference = "Stop"
+      Import-Module WebAdministration
+      if (Get-WebSite -Name "SmartBI" -ErrorAction SilentlyContinue) {
+          Stop-WebSite -Name "SmartBI"
+          Write-Host " IIS 站台 SmartBI 已安全停止"
+      }
+      if (Get-WebAppPoolState -Name "SmartBIPool" -ErrorAction SilentlyContinue) {
+          Stop-WebAppPool -Name "SmartBIPool"
+          Write-Host " App Pool SmartBIPool 已安全停止"
+      }
 
+    # 2. 自動檢測並動態更新 Windows 伺服器的 .NET Core Hosting Bundle 執行環境
+    - |
+      $HostingBundleUrl = "https://download.visualstudio.microsoft.com/download/pr/dotnet-hosting-8.0-win.exe"
+      $InstallerPath = "$env:TEMP\dotnet-hosting.exe"
+      Write-Host " 正在下載最新的 .NET Core Hosting Bundle..."
+      Invoke-WebRequest -Uri $HostingBundleUrl -OutFile $InstallerPath -UseBasicParsing
+      Write-Host " 正在執行背景升級 (Silent Install)..."
+      Start-Process -FilePath $InstallerPath -ArgumentList "/install", "/quiet", "/norestart", "OPT_NO_X86=1" -Wait -NoNewWindow
+      Remove-Item $InstallerPath -Force
+      Write-Host " .NET Hosting Bundle 升級完成"
+
+    # 3. 自動檢測並動態安裝 網頁轉址 URL Rewrite 套件
+    - |
+      $UrlRewriteUrl = "https://download.microsoft.com/download/1/2/8/128E2E22-C1B9-44A4-BE2A-5859ED1D4592/rewrite_amd64_en-US.msi"
+      $InstallerPath = "$env:TEMP\urlrewrite.msi"
+      if (-not (Get-WebConfiguration -Filter //rewrite/rewriteMaps -ErrorAction SilentlyContinue)) {
+          Write-Host "偵測到系統未安裝 URL Rewrite，開始無聲安裝..."
+          Invoke-WebRequest -Uri $UrlRewriteUrl -OutFile $InstallerPath
+          Start-Process msiexec -ArgumentList "/i $InstallerPath /quiet" -Wait
+          Remove-Item $InstallerPath -Force
+          Write-Host "URL Rewrite 模組安裝成功"
+      }
+
+    # 4. 同步發布檔案至 IIS 實體目錄並派發 web.config
+    - |
+      if (-not (Test-Path $env:IIS_DEPLOY_PATH)) {
+          New-Item -Path $env:IIS_DEPLOY_PATH -ItemType Directory -Force
+      }
+      Write-Host "正在複製編譯成果至 IIS 發布路徑: $env:IIS_DEPLOY_PATH"
+      # 從上一階段的 artifacts/publish 複製內容
+      Copy-Item -Path "artifacts/publish\*" -Destination $env:IIS_DEPLOY_PATH -Recurse -Force
+      if (Test-Path "docker/iis/web.config") {
+          Copy-Item -Path "docker/iis/web.config" -Destination $env:IIS_DEPLOY_PATH -Force
+      }
+
+    # 5. 正式執行資料庫預存程序更新 (權限控制與資料清理更新)
+    - |
+      Write-Host " 開始執行 SQL Server 資料庫預存程序與權限變更..."
+      sqlcmd -S "$env:STAGING_DB_CONNECTION" -i "sql/stored-procedures/01_db_cleanup_and_permissions.sql" -b
+
+    # 6. 重啟 IIS 服務，恢復站台營運
+    - |
+      Import-Module WebAdministration
+      Start-WebAppPool -Name "SmartBIPool"
+      Start-Website -Name "SmartBI"
+      Write-Host " SmartBI Staging 環境 IIS 站台已重新啟動！"
+
+# ============================================================
+#  STAGE 6: SMOKE (冒煙測試 / 健康檢查階段)
+# ============================================================
+
+# 使用 Windows PowerShell 對已部署的 Web API 進行 API 級別健康探測
 smoke:test:
   stage: smoke
-  image: bitnami/kubectl:1.30
-  before_script:
-    - mkdir -p ~/.kube
-    - echo "$KUBE_CONFIG_B64" | base64 -d > ~/.kube/config
-    - chmod 600 ~/.kube/config
-  script:
-    - kubectl rollout status deployment/smartbi-app -n $K8S_NAMESPACE --timeout=180s
+  tags:
+    - self-hosted
+    - windows
+    - staging
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "develop" || $CI_COMMIT_BRANCH == "main"'
+  script:
+    - |
+      Write-Host " 開始對站台進行網頁端點健康狀態探測..."
+      $MaxRetries = 10
+      $Delay = 10
+      for ($i = 1; $i -le $MaxRetries; $i++) {
+          try {
+              $Response = Invoke-WebRequest -Uri "$env:STAGING_API_URL/health" -UseBasicParsing -TimeoutSec 10
+              if ($Response.StatusCode -eq 200) {
+                  Write-Host "[Smoke Test Passed] Staging 環境站台熱機完成，回應正常！"
+                  exit 0
+              }
+          } catch {
+              Write-Host " 第 $i/$MaxRetries 次嘗試失敗，Web 服務熱機中... 等待 ${Delay} 秒..."
+              Start-Sleep -Seconds $Delay
+          }
+      }
+      Write-Error " [Smoke Test Failed] 站台部署後無法通過健康檢查 (端點回應異常)，流程強制中斷！"
+      exit 1
