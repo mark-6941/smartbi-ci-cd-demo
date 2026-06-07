@@ -9,7 +9,7 @@ function Get-ProjectTarget {
         return @{ Type = 'Project'; Path = $csproj.FullName }
     }
 
-    throw '找不到 .sln 或 .csproj，請確認 repo 內已放入 .NET 專案。'
+    throw "Could not find any .sln or .csproj file in the repository. Please make sure a .NET project is added."
 }
 
 function Ensure-Directory([string]$Path) {
