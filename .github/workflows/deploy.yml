@@ -23,7 +23,7 @@ env:
 
 jobs:
   # ==========================================
-  # JOB 1: 負責雲端/容器化 Docker 映像檔建置與推送
+  # JOB 1: 負責雲端/容器化 K8S 叢集部署
   # ==========================================
   build-and-deploy-k8s:
     runs-on: ubuntu-latest
@@ -36,6 +36,16 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name:  Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.2
+
+      - name:  Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.0
+
       - name:  Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -43,20 +53,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 【防禦步驟】動態產生虛擬專案結構，並強制指定 -f net8.0 避免 Docker 內部編譯失敗
-      - name:  建立測試用 .NET 虛擬專案結構 (防禦 Docker 內路徑卡死)
+      # 🛠️ 【修正：強制指定 -f net8.0】確保建置出來的專案與 Docker 內的 .NET 8 SDK 完美相容
+      - name: 📝 動態建置測試專案檔案 (防禦路徑檢查衝突)
         run: |
-          echo "==== [CI/CD 防禦] 開始建立虛擬測試專案結構 ===="
-          # 如果沒有 csproj 檔案，直接建置一個基礎的 WebAPI 專案結構
-          if [ ! -f *.csproj ] && [ ! -f */*.csproj ]; then
+          echo "======== [SmartBI] 正在動態建立環境防禦檔案 ========"
+          if [ ! -f *.sln ] && [ ! -f *.csproj ]; then
             dotnet new webapi -n FakeSmartBiProject -f net8.0 --force
+            dotnet new sln -n SmartBiFakeSolution --force
+            dotnet sln SmartBiFakeSolution.sln add FakeSmartBiProject/FakeSmartBiProject.csproj
+            echo "✅ 臨時測試檔案建置完成，已鎖定 .NET 8.0 目標框架。"
+          else
+            echo "ℹ️ 根目錄已存在專案檔，跳過建立。"
           fi
-          # 如果根目錄沒有方案檔，直接建一個虛擬方案檔並將專案加入
-          if [ ! -f *.sln ]; then
-            dotnet new sln -n FakeSmartBi --force
-            dotnet sln FakeSmartBi.sln add FakeSmartBiProject/FakeSmartBiProject.csproj
-          fi
-          echo "==== [CI/CD 防禦] 專案結構防禦成功，準備執行 Docker 編譯 ===="
 
       - name:  Build image
         run: |
@@ -68,23 +76,47 @@ jobs:
           docker push $IMAGE_REPOSITORY:${{ github.sha }}
           docker push $IMAGE_REPOSITORY:latest
 
+      - name:  Prepare kubeconfig
+        shell: bash
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG_B64 }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install $HELM_RELEASE_NAME ./charts/smartbi-app \
+            --namespace $K8S_NAMESPACE \
+            --create-namespace \
+            -f ./charts/smartbi-app/values.yaml \
+            -f ./charts/smartbi-app/values-dev.yaml \
+            --set image.repository=$IMAGE_REPOSITORY \
+            --set image.tag=${{ github.sha }} \
+            --set env.SmartBI__BaseUrl="${{ secrets.SMARTBI_BASE_URL }}" \
+            --set env.SmartQuery__Endpoint="${{ secrets.SMARTQUERY_ENDPOINT }}"
+
+      - name: 🩺 Smoke test
+        shell: bash
+        run: |
+          kubectl rollout status deployment/$HELM_RELEASE_NAME -n $K8S_NAMESPACE --timeout=180s
+
   # ==========================================
   # JOB 2: 負責本機實體環境 (SQL Server SP / IIS 變數)
   # ==========================================
   database-and-iis-migration:
     runs-on: windows-latest  # 指定 Windows Runner 確保 PowerShell 與實體環境相容
     steps:
-      - name:  Checkout 本機代碼
+      - name:  
         uses: actions/checkout@v4
 
-      # 本機 Windows 端同樣加上防禦機制，防止 deploy-helper.ps1 調用時噴錯
-      - name: 本機端動態建置測試專案檔案
+      # 🛠️ 本機 Windows 端同步修正框架為 net8.0
+      - name: 📝 本機端動態建置測試專案檔案
         shell: bash
         run: |
-          if [ ! -f *.sln ] && [ ! -f *.csproj ] && [ ! -f */*.csproj ]; then
+          if [ ! -f *.sln ] && [ ! -f *.csproj ]; then
             dotnet new webapi -n FakeSmartBiProject -f net8.0 --force
-            dotnet new sln -n FakeSmartBi --force
-            dotnet sln FakeSmartBi.sln add FakeSmartBiProject/FakeSmartBiProject.csproj
+            dotnet new sln -n SmartBiFakeSolution --force
+            dotnet sln SmartBiFakeSolution.sln add FakeSmartBiProject/FakeSmartBiProject.csproj
           fi
 
       - name: 還原與編譯 .NET Core 專案
