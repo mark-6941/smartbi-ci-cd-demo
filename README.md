@@ -1,4 +1,5 @@
-# SmartBI CI/CD Template
+This  Project will  famous 
+# SmartBI  Google  Antigravity  AI  CI/CD Template
 
 這是一套可直接落地的 **GitHub Actions + GitLab CI/CD + Helm + Docker** 範例，適合 .NET / SmartBI / SmartQuery 專案。
 
